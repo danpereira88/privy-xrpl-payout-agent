@@ -1,0 +1,12 @@
+node_modules/
+.next/
+out/
+next-env.d.ts
+*.tsbuildinfo
+.vercel/
+.DS_Store
+
+# secrets
+.env*.local
+.env
+*.rtf
