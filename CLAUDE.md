@@ -23,7 +23,7 @@ AI does the fuzzy parts (parsing, planning, anomaly flags, explanations). Buildi
 - TypeScript, Next.js (App Router), pnpm. Hosted on Vercel's free tier.
 - `@privy-io/react-auth` for login, `@privy-io/node` for server wallets, policies and signing.
 - `xrpl` (xrpl.js) to autofill, encode, submit and confirm transactions.
-- `@anthropic-ai/sdk` with tool use. Default model: `claude-sonnet-5-5`. Agent tools: `list_payees`, `get_balances`, `propose_plan`, `execute_payment`, `get_tx_status`. `execute_payment` only runs on an operator-approved plan.
+- `@anthropic-ai/sdk` with tool use. Default model: `claude-sonnet-5-5`. Agent tools: `list_payees`, `get_balances`, `get_recent_payouts`, `propose_plan`. The agent only plans; execution of an operator-approved (MAC-signed) plan is plain code, one payment per request.
 - Payees and history in a JSON file or SQLite. No real database in v1.
 - Vitest for the few tests worth having. Prettier with default settings.
 

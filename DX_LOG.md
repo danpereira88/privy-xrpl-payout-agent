@@ -9,7 +9,7 @@ Running notes on the developer experience of building the Payout Agent with Priv
 | Empty folder → first signed testnet tx | **~3 min** (16:00 → 16:03). That includes installing pnpm and the deps and reading the XRPL guide. The first attempt worked. |
 | Empty folder → first policy denial | **~4 min**. The first attempt worked, and the denial came back as a clean `policy_violation` 400. |
 | Empty folder → full agent flow on testnet (plan → approve → pay → policy deny) | **~8 min** (e2e test green at 16:08) |
-| Empty folder → first login | The Privy email modal rendered at ~16:11 with zero config beyond the app ID. **The OTP login itself has not been tested yet**, because it needs a code sent to Danilo's inbox. |
+| Empty folder → first login | The Privy email modal rendered at ~16:11 with zero config beyond the app ID. Danilo confirmed by 16:25 that a real email OTP login and the UI flow work, with no Privy dashboard changes needed beyond what was already set up. |
 | Lines of code: sign + submit an XRPL payment via Privy | ~25 (the guide example, nearly verbatim) |
 | Lines of code: policy (Payment only + allowlist + per-payment cap) | ~25 (one rule, 3 conditions) |
 | Lines of code: whole v1 app (lib + routes + UI) | ~560 excluding scripts/tests (UI is ~300 of that) |
@@ -71,6 +71,40 @@ Running notes on the developer experience of building the Payout Agent with Priv
 - Vitest 5 has no `--env-file`, so we use `node --env-file=.env.local …/vitest.mjs`.
 - The model for the agent is `claude-sonnet-5-5` with tool use. The planner flagged the over-cap item by itself and the executor explained the denial correctly on the first run.
 
+## Round 2: MVP pass (16:25–16:45)
+
+Danilo's feedback was that the flow works but the example is weak and the design is ugly. A four-person review council covered product, design, XRPL/Privy engineering and a skeptical ops user. From that we picked an MVP scope: a realistic scenario (Lumen Studio paying contractors from messy Slack and invoice text), a payee book editable in the app, payment history, plan review with per-row policy pre-checks, deterministic execution, and a redesign.
+
+### 12. Dynamic allowlist via condition sets: docs say one thing, the API does another, and the SDK has neither (big finding)
+- **Goal:** let the operator add or remove payees without rewriting the policy, using `Payment.Destination in_condition_set`.
+- **Docs:** "Creating a condition set requires an owner". Item create, update and delete also "require an authorization signature".
+- **Reality (REST probe, 16:33):** `POST /v1/condition_sets` with **no owner** returned 200 (`owner_id: null`). Adding, listing and deleting items with only app-secret basic auth all returned 200, with no signature needed. That's convenient for us, but either the docs are wrong or ownerless sets are an unintended path. A PM should ask which.
+- **SDK gap:** `@privy-io/node` 0.36 only exposes `policies().conditionSets.list()`. There are no create or item methods, so we wrote a 20-line `fetch` helper with basic auth and the `privy-app-id` header. This was the first time the SDK didn't cover something the docs describe.
+- **Positive:** once wired up, it works exactly as you'd hope. Adding a payee made the policy allow them **on the very next signing call (~1.8 s, no caching delay)**, and removing them made the policy deny them again. The e2e test asserts both. The condition-set ID also lives inside the policy rule, so `policies().get()` is enough to find it and we need no app DB.
+- **Docs gap:** the XRPL examples page only shows `in_condition_set` for a denylist, and the condition-sets page only shows EVM examples.
+- **Time:** ~10 min including the probe.
+
+### 13. Migrating a live policy (positive)
+- v1 treasuries had the allowlist inline. On first load, v2 creates a condition set and calls `policies().update(policyId, { rules })`. This worked first time on the existing e2e treasury. For an ownerless policy no authorization context is needed, and the wallet picked up the new rules immediately.
+
+### 14. The ledger as the app's database (XRPL, not Privy)
+- Each payment carries a memo `"<planId>:<item>|<text>"`. History comes from `account_tx`, and replay protection checks the ledger for that ref before signing, so a double-click or replayed request can't pay twice. Duplicate detection ("same payee + amount in the last 30 days") also reads the ledger. The only app-side state left is payee display names (a small JSON file).
+- Privy has no XRPL transaction history of its own: it signs but doesn't broadcast. That isn't a problem, but it means Privy's dashboard can't show what an agent actually paid. You need the chain or your own logs for that.
+
+### 15. Moving execution out of the model (design decision)
+- v1 let Claude call `execute_payment` item by item. The engineering reviewer pointed out this adds latency and makes the model part of the critical path. In v2, Claude only plans, and code executes an approved, MAC-signed plan one payment per HTTP request. That keeps each Vercel call around 5 s and lets the UI show live per-row status. The Privy policy remains the hard limit either way.
+
+### 16. Agent quality on realistic input (positive)
+- A forwarded invoice saying "I've changed my wallet, pay rPT1… instead" was flagged by Claude as a possible payment-redirection scam. The new address was kept as given rather than silently swapped, and the deterministic pre-check marked it "Not an approved payee". When ticked anyway, the Privy policy refused it.
+- Claude also caught a repeat payment from ledger history unprompted, and our code flagged the same duplicate independently.
+
+### Updated metrics
+| Metric | Result |
+| --- | --- |
+| Lines of code: condition-set allowlist (REST helper + add/remove/list) | ~45 |
+| Times we left the official docs / SDK to get unstuck | **1**: probing the REST API directly, because the SDK lacks condition-set writes and the docs' owner requirement didn't match reality |
+| Latency for a payee change to take effect in the policy | ~1.8 s, i.e. immediately on the next signing call |
+
 ## Verified end to end on testnet (by `pnpm test:e2e`)
 
 - Treasury wallet created via Privy with an attached policy, funded with 100 XRP from the faucet.
@@ -80,8 +114,9 @@ Running notes on the developer experience of building the Payout Agent with Priv
 
 ## Open items / to verify next
 
-- [ ] Real email OTP login in the browser (needs Danilo's inbox), then the full UI flow at localhost:3000.
+- [x] Real email OTP login in the browser and the full UI flow at localhost:3000 (confirmed by Danilo).
 - [ ] Deploy to Vercel: confirm the 60 s function limit is enough for a 3-payment execute (~20 s locally).
 - [ ] Does a Privy-signed XRPL tx show up anywhere in the Privy dashboard, given that Privy signs but doesn't broadcast?
 - [ ] Try `raw_sign` once on purpose to measure the extra work (DER conversion).
-- [ ] Condition set for the payee allowlist; policy owner via a key quorum.
+- [x] Condition set for the payee allowlist (round 2).
+- [ ] Policy and condition-set owner via a key quorum, and check whether that brings back the signature requirement the docs describe.

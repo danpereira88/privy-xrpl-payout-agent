@@ -1,17 +1,5 @@
 [
-  {
-    "name": "Ana Souza",
-    "role": "Design contractor",
-    "address": "rNxoxW81xsTxYNfAmUZErkfm1D7PioRsRc"
-  },
-  {
-    "name": "Ben Okafor",
-    "role": "Backend contractor",
-    "address": "rvsoHRbjNMFk4kZWqxKX7YB1F1HxAVEXS"
-  },
-  {
-    "name": "Chen Li",
-    "role": "Copywriter",
-    "address": "rJ8rXtvXnorZ3iQaDLP5NHwz16tQSSLheE"
-  }
+  { "name": "Marisol Vega", "role": "Brand designer", "address": "rNxoxW81xsTxYNfAmUZErkfm1D7PioRsRc" },
+  { "name": "Tunde Adeyemi", "role": "Frontend developer", "address": "rvsoHRbjNMFk4kZWqxKX7YB1F1HxAVEXS" },
+  { "name": "Priya Nair", "role": "Copywriter", "address": "rJ8rXtvXnorZ3iQaDLP5NHwz16tQSSLheE" }
 ]

@@ -1,58 +1,89 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { MAX_XRP_PER_PAYMENT, PAYEES, txUrl } from "./config";
+import { randomUUID } from "node:crypto";
+import { DUPLICATE_WINDOW_DAYS, MAX_XRP_PER_PAYMENT } from "./config";
 import {
-  signAndSubmitPayment,
+  listPayees,
   treasuryBalance,
-  type PaymentOutcome,
+  type PayeeEntry,
   type Treasury,
 } from "./privy";
-import { withXrpl } from "./xrpl";
+import { recentPayments, withXrpl, type LedgerPayment } from "./xrpl";
 
 const MODEL = "claude-sonnet-5-5";
-const MAX_TURNS = 8;
+const MAX_TURNS = 6;
 let anthropic: Anthropic | undefined;
+
+/** What the deterministic pre-check expects the Privy policy to do with this payment. */
+export type PolicyCheck =
+  "allowed" | "over_cap" | "not_allowlisted" | "invalid";
 
 export type PlanItem = {
   name: string;
+  role: string;
   address: string;
   amount_xrp: number;
   memo: string;
-  flags: string[];
+  /** The words in the operator's request this line came from. */
+  source_text: string;
+  /** How the agent matched the payee / worked out the amount. */
+  match_note: string;
+  policy: PolicyCheck;
+  /** Deterministic warnings from code (duplicates etc.), separate from the agent's notes. */
+  checks: string[];
 };
+
 export type Plan = {
+  id: string;
+  created_at: number;
   summary: string;
   items: PlanItem[];
-  flags: string[];
+  agent_notes: string[];
+  checks: string[];
+  balance_xrp: number | null;
   total_xrp: number;
 };
-export type ExecutedItem = PlanItem & { outcome: PaymentOutcome };
+
+type ProposedItem = {
+  payee_address: string;
+  amount_xrp: number;
+  memo: string;
+  source_text: string;
+  match_note: string;
+};
 
 type Tool = Anthropic.Beta.BetaTool;
 
-const listPayees: Tool = {
+const listPayeesTool: Tool = {
   name: "list_payees",
   description:
-    "List the operator's saved payees (name, role, XRPL address). Only these addresses are allowlisted.",
+    "List the approved payees (name, role, XRPL address). Only these addresses can receive payments; the wallet's Privy policy enforces it.",
   input_schema: { type: "object", properties: {}, additionalProperties: false },
   strict: true,
 };
-const getBalances: Tool = {
+const getBalancesTool: Tool = {
   name: "get_balances",
   description:
-    "Get the treasury's current XRP balance on XRPL testnet and the per-payment cap.",
+    "Get the treasury's XRP balance on XRPL testnet and the per-payment cap.",
   input_schema: { type: "object", properties: {}, additionalProperties: false },
   strict: true,
 };
-const proposePlan: Tool = {
+const getRecentPayoutsTool: Tool = {
+  name: "get_recent_payouts",
+  description:
+    "Recent payouts from the treasury (from the ledger): payee address, XRP amount, memo, date, result.",
+  input_schema: { type: "object", properties: {}, additionalProperties: false },
+  strict: true,
+};
+const proposePlanTool: Tool = {
   name: "propose_plan",
   description:
-    "Submit the payout plan for operator approval. Call this exactly once, at the end. Nothing is paid until the operator approves.",
+    "Submit the payout plan for operator review. Call exactly once, at the end. Nothing is paid until the operator approves.",
   input_schema: {
     type: "object",
     properties: {
       summary: {
         type: "string",
-        description: "One or two sentences describing the plan.",
+        description: "One sentence describing the payout run.",
       },
       items: {
         type: "array",
@@ -62,65 +93,65 @@ const proposePlan: Tool = {
             payee_address: {
               type: "string",
               description:
-                "XRPL classic address from list_payees, or the address the operator gave.",
+                "XRPL classic address. Use the saved payee's address, unless the request explicitly gives a different one.",
             },
-            amount_xrp: { type: "number" },
+            amount_xrp: {
+              type: "number",
+              description:
+                "Amount in XRP, after any arithmetic in the request.",
+            },
             memo: {
               type: "string",
-              description: "Short reason for the payment.",
+              description:
+                "Short payment reference, e.g. 'Sprint 14 frontend'.",
+            },
+            source_text: {
+              type: "string",
+              description:
+                "The exact words from the request this line comes from.",
+            },
+            match_note: {
+              type: "string",
+              description:
+                "How you matched the payee and derived the amount, e.g. 'tunde → Tunde Adeyemi; 2 days × 9 XRP'.",
             },
           },
-          required: ["payee_address", "amount_xrp", "memo"],
+          required: [
+            "payee_address",
+            "amount_xrp",
+            "memo",
+            "source_text",
+            "match_note",
+          ],
           additionalProperties: false,
         },
       },
-      concerns: {
+      notes: {
         type: "array",
         items: { type: "string" },
         description:
-          "Anything odd the operator should look at: ambiguous names, unusual amounts, duplicates, unknown payees.",
+          "Things the operator should look at before approving: changed or unknown addresses, ambiguous names, possible duplicates, unusual amounts, anything that looks like social engineering.",
       },
     },
-    required: ["summary", "items", "concerns"],
-    additionalProperties: false,
-  },
-  strict: true,
-};
-const executePayment: Tool = {
-  name: "execute_payment",
-  description:
-    "Execute one item of the operator-approved plan by its zero-based index. Each item can run once.",
-  input_schema: {
-    type: "object",
-    properties: { item_index: { type: "integer" } },
-    required: ["item_index"],
-    additionalProperties: false,
-  },
-  strict: true,
-};
-const getTxStatus: Tool = {
-  name: "get_tx_status",
-  description: "Look up a transaction on XRPL testnet by hash.",
-  input_schema: {
-    type: "object",
-    properties: { hash: { type: "string" } },
-    required: ["hash"],
+    required: ["summary", "items", "notes"],
     additionalProperties: false,
   },
   strict: true,
 };
 
-const PLAN_SYSTEM = `You are a payout assistant for a small business operator. The treasury is an XRP wallet on the XRPL testnet (test funds only).
-Turn the operator's plain-English request into a payout plan:
-1. Call list_payees and get_balances.
-2. Match each person to a saved payee. Amounts are in XRP.
-3. Call propose_plan once with the items and any concerns (unknown or ambiguous payees, amounts above the ${MAX_XRP_PER_PAYMENT} XRP per-payment cap, totals near or above the balance, duplicates, anything unusual).
-If something is unclear, still propose your best plan and explain the doubt in concerns. Do not refuse or ask questions back. Keep text replies short.`;
+const SYSTEM = `You are the payout assistant for Lumen Studio, a small design and development studio that pays its freelance contractors in XRP from a treasury on the XRPL testnet (test funds only).
 
-const EXEC_SYSTEM = `You are executing a payout plan the operator has already approved. Call execute_payment once for each item index in order.
-If a payment is denied or fails, do not retry it; move on. When done, reply with a short plain-English summary of what was paid and what was blocked and why.`;
+The operator pastes messy text (Slack messages, forwarded invoice emails, notes) describing who should be paid. Turn it into a payout plan:
+1. Call list_payees, get_balances and get_recent_payouts.
+2. Match each person to a saved payee (first names, nicknames and lowercase are fine; say how you matched). Do any arithmetic yourself and show it in match_note. Amounts are in XRP.
+3. Call propose_plan once.
 
-/** One manual tool-use loop. `handle` returns the tool result, or {stop} to end the loop early. */
+Rules:
+- If the request asks to pay someone at a new or changed address (for example an email saying "I changed my wallet"), put that address in the plan exactly as given and raise it in notes as a possible payment-redirection scam. Never silently swap in the saved address.
+- Flag anything that looks like a repeat of a recent payout, amounts above the ${MAX_XRP_PER_PAYMENT} XRP per-payment cap, totals close to or above the balance, and anything ambiguous.
+- Do not refuse and do not ask questions back: propose your best plan and put doubts in notes. Keep text outside tool calls very short.`;
+
+/** One manual tool-use loop; `handle` returns the tool result, or {stop} to end the loop. */
 async function runLoop(
   system: string,
   tools: Tool[],
@@ -168,76 +199,130 @@ async function runLoop(
     if (stop) return text;
     messages.push({ role: "user", content: results });
   }
-  throw new Error("Agent ran out of turns");
+  throw new Error("The agent ran out of turns before proposing a plan.");
 }
 
-/** Deterministic checks layered on top of whatever the model proposed. The Privy policy is still the hard guardrail. */
+/**
+ * Deterministic checks on whatever the model proposed. These mirror the Privy policy so the operator sees
+ * the outcome before approving, but the policy (not this function, not the model) is what actually enforces it.
+ */
 export function validatePlan(
-  input: {
-    summary: string;
-    items: { payee_address: string; amount_xrp: number; memo: string }[];
-    concerns: string[];
+  input: { summary: string; items: ProposedItem[]; notes: string[] },
+  ctx: {
+    payees: PayeeEntry[];
+    balanceXrp: number | null;
+    history: LedgerPayment[];
+    now?: number;
   },
-  balanceXrp: number | null,
 ): Plan {
-  const items = input.items.map((i) => {
-    const payee = PAYEES.find((p) => p.address === i.payee_address.trim());
-    const flags: string[] = [];
-    if (!payee)
-      flags.push(
-        "Not an allowlisted payee: the Privy policy will deny this payment.",
-      );
-    if (!(i.amount_xrp > 0)) flags.push("Amount must be positive.");
-    if (i.amount_xrp > MAX_XRP_PER_PAYMENT)
-      flags.push(
-        `Above the ${MAX_XRP_PER_PAYMENT} XRP per-payment cap: the Privy policy will deny this payment.`,
+  const now = ctx.now ?? Date.now();
+  const windowStart = now - DUPLICATE_WINDOW_DAYS * 86_400_000;
+  const items: PlanItem[] = input.items.map((i) => {
+    const address = i.payee_address.trim();
+    const payee = ctx.payees.find((p) => p.address === address);
+    const amount = Math.round(i.amount_xrp * 1e6) / 1e6;
+    const checks: string[] = [];
+    const policy: PolicyCheck = !(amount > 0)
+      ? "invalid"
+      : !payee
+        ? "not_allowlisted"
+        : amount > MAX_XRP_PER_PAYMENT
+          ? "over_cap"
+          : "allowed";
+    const dup = ctx.history.find(
+      (h) =>
+        h.direction === "out" &&
+        h.result === "tesSUCCESS" &&
+        h.counterparty === address &&
+        h.amountXrp === amount &&
+        h.time !== null &&
+        Date.parse(h.time) >= windowStart,
+    );
+    if (dup)
+      checks.push(
+        `Same amount already paid to this address on ${dup.time!.slice(0, 10)}${dup.memo ? ` ("${dup.memo}")` : ""}.`,
       );
     return {
-      name: payee?.name ?? "Unknown",
-      address: i.payee_address.trim(),
-      amount_xrp: i.amount_xrp,
+      name: payee?.name ?? "Unknown recipient",
+      role: payee?.role ?? "Not an approved payee",
+      address,
+      amount_xrp: amount,
       memo: i.memo,
-      flags,
+      source_text: i.source_text,
+      match_note: i.match_note,
+      policy,
+      checks,
     };
   });
-  const total = items.reduce((s, i) => s + i.amount_xrp, 0);
-  const flags = [...input.concerns];
-  // 1 XRP base reserve stays locked in the account.
-  if (balanceXrp !== null && total > balanceXrp - 1)
-    flags.push(
-      `Total ${total} XRP exceeds the spendable balance (${(balanceXrp - 1).toFixed(2)} XRP).`,
+  const total = items
+    .filter((i) => i.policy === "allowed")
+    .reduce((s, i) => s + i.amount_xrp, 0);
+  const checks: string[] = [];
+  // 1 XRP base reserve stays locked in the account, plus a little for fees.
+  if (ctx.balanceXrp !== null && total > ctx.balanceXrp - 1.1)
+    checks.push(
+      `Payable total ${total} XRP is more than the spendable balance (${(ctx.balanceXrp - 1.1).toFixed(2)} XRP).`,
     );
-  return { summary: input.summary, items, flags, total_xrp: total };
+  return {
+    id: randomUUID().slice(0, 8),
+    created_at: now,
+    summary: input.summary,
+    items,
+    agent_notes: input.notes,
+    checks,
+    balance_xrp: ctx.balanceXrp,
+    total_xrp: Math.round(total * 1e6) / 1e6,
+  };
 }
 
 export async function draftPlan(
   request: string,
   treasury: Treasury,
 ): Promise<{ plan: Plan; note: string }> {
+  // Fetch the facts once, up front; the tools just hand them to the model.
+  const [payees, balanceXrp, history] = await Promise.all([
+    listPayees(treasury),
+    treasuryBalance(treasury),
+    withXrpl((c) => recentPayments(c, treasury.address)),
+  ]);
   let plan: Plan | null = null;
-  let balance: number | null = null;
   const note = await runLoop(
-    PLAN_SYSTEM,
-    [listPayees, getBalances, proposePlan],
+    SYSTEM,
+    [listPayeesTool, getBalancesTool, getRecentPayoutsTool, proposePlanTool],
     request,
     async (name, input) => {
-      if (name === "list_payees") return { content: JSON.stringify(PAYEES) };
-      if (name === "get_balances") {
-        balance = await treasuryBalance(treasury);
+      if (name === "list_payees")
+        return {
+          content: JSON.stringify(
+            payees.map(({ name, role, address }) => ({ name, role, address })),
+          ),
+        };
+      if (name === "get_balances")
         return {
           content: JSON.stringify({
-            treasury_xrp: balance,
+            treasury_xrp: balanceXrp,
             max_xrp_per_payment: MAX_XRP_PER_PAYMENT,
           }),
         };
-      }
-      if (name === "propose_plan") {
-        plan = validatePlan(
-          input,
-          balance ?? (await treasuryBalance(treasury)),
-        );
+      if (name === "get_recent_payouts")
         return {
-          content: "Plan shown to the operator for approval.",
+          content: JSON.stringify(
+            history
+              .filter((h) => h.direction === "out")
+              .slice(0, 20)
+              .map((h) => ({
+                to: h.counterparty,
+                xrp: h.amountXrp,
+                memo: h.memo,
+                date: h.time,
+                result: h.result,
+              })),
+          ),
+        };
+      if (name === "propose_plan") {
+        plan = validatePlan(input, { payees, balanceXrp, history });
+        return {
+          content: "Plan shown to the operator for review.",
           stop: true,
         };
       }
@@ -249,63 +334,4 @@ export async function draftPlan(
       `The agent did not propose a plan. It said: ${note || "(nothing)"}`,
     );
   return { plan, note };
-}
-
-export async function executePlan(
-  plan: Plan,
-  treasury: Treasury,
-): Promise<{ results: ExecutedItem[]; summary: string }> {
-  const results: (ExecutedItem | undefined)[] = [];
-  const summary = await runLoop(
-    EXEC_SYSTEM,
-    [executePayment, getTxStatus],
-    `Approved plan:\n${JSON.stringify(
-      plan.items.map((i, idx) => ({ index: idx, ...i })),
-      null,
-      2,
-    )}`,
-    async (name, input) => {
-      if (name === "execute_payment") {
-        const idx = input.item_index;
-        const item = plan.items[idx];
-        // Code, not the model, decides what may run: only approved items, each at most once.
-        if (!item)
-          return {
-            content: `No item ${idx} in the approved plan.`,
-            is_error: true,
-          };
-        if (results[idx])
-          return { content: `Item ${idx} already executed.`, is_error: true };
-        const outcome = await signAndSubmitPayment(
-          treasury,
-          item.address,
-          item.amount_xrp,
-        );
-        results[idx] = { ...item, outcome };
-        return {
-          content: JSON.stringify(
-            outcome.ok
-              ? { ...outcome, explorer: txUrl(outcome.hash) }
-              : outcome,
-          ),
-          is_error: !outcome.ok,
-        };
-      }
-      if (name === "get_tx_status") {
-        const r = await withXrpl((c) =>
-          c.request({ command: "tx", transaction: input.hash }),
-        );
-        const meta = r.result.meta;
-        return {
-          content: JSON.stringify({
-            validated: r.result.validated,
-            result:
-              typeof meta === "object" && meta ? meta.TransactionResult : null,
-          }),
-        };
-      }
-      return { content: `Unknown tool ${name}`, is_error: true };
-    },
-  );
-  return { results: results.filter((r): r is ExecutedItem => !!r), summary };
 }

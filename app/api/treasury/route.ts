@@ -1,4 +1,4 @@
-import { MAX_XRP_PER_PAYMENT, PAYEES, accountUrl } from "@/lib/config";
+import { MAX_XRP_PER_PAYMENT, accountUrl } from "@/lib/config";
 import { route } from "@/lib/http";
 import { getOrCreateTreasury, requireUser, treasuryBalance } from "@/lib/privy";
 import { fundFromFaucet, withXrpl } from "@/lib/xrpl";
@@ -7,25 +7,22 @@ export const maxDuration = 60;
 
 /** Get (or lazily create + fund) the operator's treasury. */
 export const GET = route(async (req) => {
-  const userId = await requireUser(req);
-  const t = await getOrCreateTreasury(userId);
-  const balance = await treasuryBalance(t);
+  const t = await getOrCreateTreasury(await requireUser(req));
+  const balanceXrp = await treasuryBalance(t, { fundIfMissing: true });
   return {
     address: t.address,
     walletId: t.walletId,
     policyId: t.policyId,
+    payeeSetId: t.payeeSetId,
     created: t.created,
-    balanceXrp: balance,
+    balanceXrp,
     explorer: accountUrl(t.address),
     maxXrpPerPayment: MAX_XRP_PER_PAYMENT,
-    payees: PAYEES,
   };
 });
 
 /** Top up from the testnet faucet. */
 export const POST = route(async (req) => {
-  const userId = await requireUser(req);
-  const t = await getOrCreateTreasury(userId);
-  const balanceXrp = await withXrpl((c) => fundFromFaucet(c, t.address));
-  return { balanceXrp };
+  const t = await getOrCreateTreasury(await requireUser(req));
+  return { balanceXrp: await withXrpl((c) => fundFromFaucet(c, t.address)) };
 });
