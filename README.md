@@ -33,6 +33,9 @@ pnpm test:e2e    # real run on XRPL testnet: Privy wallet + policy, Claude plan,
 
 ## Deploy to Vercel
 
+Live: https://privy-xrpl-payout-agent.vercel.app (health check: `/api/health`). Redeploy with `npx vercel deploy --prod` once you're logged in with `npx vercel login`.
+
+
 1. Push the repo to GitHub and import it in Vercel. The framework preset is Next.js and the install command is `pnpm install`.
 2. In the project's Environment Variables, add `PRIVY_APP_ID`, `PRIVY_APP_SECRET`, `ANTHROPIC_API_KEY` and, optionally, `MAX_XRP_PER_PAYMENT` and `PLAN_SECRET`.
 3. In the Privy dashboard, add the Vercel domain to the app's allowed origins.

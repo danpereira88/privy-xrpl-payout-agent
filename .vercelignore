@@ -1,0 +1,7 @@
+.env
+.env*.local
+*.rtf
+data/.store.json
+node_modules
+.next
+.claude

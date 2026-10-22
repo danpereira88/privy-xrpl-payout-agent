@@ -105,6 +105,15 @@ Danilo's feedback was that the flow works but the example is weak and the design
 | Times we left the official docs / SDK to get unstuck | **1**: probing the REST API directly, because the SDK lacks condition-set writes and the docs' owner requirement didn't match reality |
 | Latency for a payee change to take effect in the policy | ~1.8 s, i.e. immediately on the next signing call |
 
+## Round 3: deploy to Vercel (16:51–17:10)
+
+### 17. Deploying to Vercel (mostly smooth; one non-Privy trap)
+- **Steps:** Danilo ran `npx vercel login` (the one thing that needed a human), then `vercel link`, `vercel env add` ×6 (3 vars × production/preview, piped from `.env.local` so nothing was printed) and `vercel deploy --prod`. Build time on Vercel was ~3 min.
+- **Privy on Vercel:** no Privy-specific config was needed. Exposing `PRIVY_APP_ID` to the browser through `next.config.ts` `env` worked at build time. The production login modal opened on the new `*.vercel.app` domain with no errors and no allowed-origins change made yet. That suggests the app has no domain allowlist configured, which is convenient but worth tightening for anything real. A full OTP login on prod isn't confirmed yet.
+- **Trap (xrpl.js, not Privy):** the first deploy served the page fine, but every API route returned a 500 with `ERR_REQUIRE_ESM`. `@xrplf/isomorphic@1.0.2` (a CommonJS dependency of xrpl 5) `require()`s `@noble/hashes@^2`, which is ESM-only. This works locally on Node 26 but not on Vercel's Node runtime. I had listed `xrpl` in `serverExternalPackages`; removing it so Next bundles xrpl fixed it. `@privy-io/node` stays external, and it uses `@noble/hashes@1.8`, which has no issue. Cost: ~10 min, plus one extra deploy.
+- **Added `/api/health`** (public, read-only), which connects to XRPL testnet and returns the ledger index. It's a quick way to check that a deploy can reach the chain.
+- **Side effect worth knowing:** `vercel link` silently appended a `VERCEL_OIDC_TOKEN` to `.env.local`.
+
 ## Verified end to end on testnet (by `pnpm test:e2e`)
 
 - Treasury wallet created via Privy with an attached policy, funded with 100 XRP from the faucet.
@@ -115,7 +124,8 @@ Danilo's feedback was that the flow works but the example is weak and the design
 ## Open items / to verify next
 
 - [x] Real email OTP login in the browser and the full UI flow at localhost:3000 (confirmed by Danilo).
-- [ ] Deploy to Vercel: confirm the 60 s function limit is enough for a 3-payment execute (~20 s locally).
+- [x] Deployed: https://privy-xrpl-payout-agent.vercel.app (execute is one payment per request, ~5 s each, so the 60 s limit isn't a concern).
+- [ ] Full OTP login + payout on the production URL.
 - [ ] Does a Privy-signed XRPL tx show up anywhere in the Privy dashboard, given that Privy signs but doesn't broadcast?
 - [ ] Try `raw_sign` once on purpose to measure the extra work (DER conversion).
 - [x] Condition set for the payee allowlist (round 2).
