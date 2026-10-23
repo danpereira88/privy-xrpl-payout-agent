@@ -1,8 +1,16 @@
 # Payout Agent
 
-A small app for evaluating Privy's developer experience on the XRP Ledger **testnet**. An operator logs in with email and gets a treasury, which is a Privy server wallet on XRPL testnet funded from the faucet. They describe payouts in plain English, Claude drafts a plan, and after the operator approves it the payments are signed through Privy and submitted to testnet. A Privy policy enforces Payment-only transactions, allowlisted payees and a per-payment cap, and the "Break it" panel shows the policy refusing.
+**Live demo:** https://privy-xrpl-payout-agent.vercel.app (XRPL testnet, log in with any email)
 
-The DX notes live in [DX_LOG.md](DX_LOG.md). Project rules are in [CLAUDE.md](CLAUDE.md).
+An AI agent that pays contractors from a crypto treasury, with hard guardrails the model can't talk its way past. An operator logs in with email and gets a treasury, which is a Privy server wallet on XRPL testnet funded from the faucet. They describe payouts in plain English, Claude drafts a plan, and after the operator approves it the payments are signed through Privy and submitted to testnet. A Privy policy enforces Payment-only transactions, allowlisted payees and a per-payment cap, and the "Break it" panel shows the policy refusing.
+
+Built as a hands-on evaluation of Privy's developer experience on the XRP Ledger.
+
+- **[DX_LOG.md](DX_LOG.md)** has timed DX notes: ~3 min from empty folder to the first signed testnet transaction, ~4 min to the first policy denial, plus every point of friction along the way.
+- **Design principle:** the model only parses and plans. Signing and submitting are deterministic code, and the Privy policy is the hard limit (see [How it works](#how-it-works)).
+- **Stack:** Next.js 15, TypeScript, Privy server wallets and policies, xrpl.js, the Claude API with tool use, Vitest, Vercel.
+
+Project rules for Claude Code are in [CLAUDE.md](CLAUDE.md).
 
 ## Run locally
 
@@ -34,7 +42,6 @@ pnpm test:e2e    # real run on XRPL testnet: Privy wallet + policy, Claude plan,
 ## Deploy to Vercel
 
 Live: https://privy-xrpl-payout-agent.vercel.app (health check: `/api/health`). Redeploy with `npx vercel deploy --prod` once you're logged in with `npx vercel login`.
-
 
 1. Push the repo to GitHub and import it in Vercel. The framework preset is Next.js and the install command is `pnpm install`.
 2. In the project's Environment Variables, add `PRIVY_APP_ID`, `PRIVY_APP_SECRET`, `ANTHROPIC_API_KEY` and, optionally, `MAX_XRP_PER_PAYMENT` and `PLAN_SECRET`.
